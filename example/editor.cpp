@@ -242,8 +242,11 @@ void Editor::renderMenuBar() {
 			if (ImGui::MenuItem("Paste", " " SHORTCUT "V", nullptr, ImGui::GetClipboardText() != nullptr)) { editor.Paste(); }
 
 			ImGui::Separator();
+			bool flag;
+			flag = editor.IsInsertSpacesOnTabs(); if (ImGui::MenuItem("Insert Spaces on Tabs", nullptr, &flag)) { editor.SetInsertSpacesOnTabs(flag); };
+
 			if (ImGui::MenuItem("Tabs To Spaces")) { editor.TabsToSpaces(); }
-			if (ImGui::MenuItem("Spaces To Tabs")) { editor.SpacesToTabs(); }
+			if (ImGui::MenuItem("Spaces To Tabs", nullptr, nullptr, !editor.IsInsertSpacesOnTabs())) { editor.SpacesToTabs(); }
 			if (ImGui::MenuItem("Strip Trailing Whitespaces")) { editor.StripTrailingWhitespaces(); }
 
 			ImGui::EndMenu();

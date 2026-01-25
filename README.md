@@ -65,6 +65,7 @@ public API to externally implement these features is however included.
 - Has full undo/redo capabilities and supports native clipboard with UTF-8 encoded strings.
 - Has extendable syntax highlighting for multiple languages and API for custom languages.
 - Has customizable color palettes (a dark and light version that work with Dear ImGui defaults are included).
+- Has option to automatically insert spaces on tabs.
 - Has find/replace user interface and API with full undo/redo.
 - Find has options for whole word and/or case-sensitive searches.
 - Has marker API to specify lines and/or line numbers to highlight and optional show tooltips (see [example](docs/markers.md)).

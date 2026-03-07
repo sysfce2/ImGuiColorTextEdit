@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <functional>
 #include <iterator>
 #include <memory>
@@ -92,6 +93,14 @@ public:
 		return document.getSectionText(
 			document.normalizeCoordinate(Coordinate(startLine, startColumn)),
 			document.normalizeCoordinate(Coordinate(endLine, endColumn)));
+	}
+
+	inline void ReplaceSectionText(int startLine, int startColumn, int endLine, int endColumn, const std::string_view& text) {
+		return replaceSectionText(
+			document.normalizeCoordinate(Coordinate(startLine, startColumn)),
+			document.normalizeCoordinate(Coordinate(endLine, endColumn)),
+			text
+		);
 	}
 
 	inline void ClearText() { SetText(""); }
@@ -196,10 +205,18 @@ public:
 	inline void ClearMarkers() { clearMarkers(); }
 	inline bool HasMarkers() const { return markers.size() != 0; }
 
+	// change callback (called when changes are made (including undo/redo))
+	// passed nullptr deactivates the callback
+	// the delay parameter specifies a time in miliseconds that the editor will wait for before calling
+	// which helps in case you don't need to track every keystroke
+	inline void SetChangeCallback(std::function<void()> callback, int delay=0) {
+		changeCallback = callback;
+		changeCallbackDelay = std::chrono::milliseconds{delay};
+	}
+
 	// line-based callbacks (line numbers are zero-based)
-	// insertor callbacks are called when lines are added/inserted
-	// deletor callbacks are called when lines are deleted
-	// these callbacks work with user data (see below)
+	// insertor callback is called when for each line inserted and the result is used as line specific user data
+	// deletor callback is called for each line deleted (line specific user data is passed to callback)
 	// setting either callback to nullptr will deactivate that callback
 	inline void SetInsertor(std::function<void*(int line)> callback) { document.setInsertor(callback); }
 	inline void SetDeletor(std::function<void(int line, void* data)> callback) { document.setDeletor(callback); }
@@ -209,7 +226,7 @@ public:
 	// user data is an opaque void* that must be managed externally
 	// user data is also passed to the decorator callback (see below)
 	// user data is attached to a line and additions/insertions/deletions don't effect this
-	// if a line with user data is removed, it won't come back on a redo (yet)
+	// if a line with user data is removed, it won't come back on a redo
 	// the deletor callback (if specified) is called when a line is deleted (see above)
 	inline void SetUserData(int line, void* data) { document.setUserData(line, data); }
 	inline void* GetUserData(int line) const { return document.getUserData(line); }
@@ -244,6 +261,7 @@ public:
 	inline bool HasTextContextMenuCallback() const { return textContextMenuCallback != nullptr; }
 
 	// useful functions to work on selections
+	// NOTE: functions provided to FilterSelections or FilterLines should accept and return UTF-8 encoded strings
 	inline void IndentLines() { if (!readOnly) indentLines(); }
 	inline void DeindentLines() { if (!readOnly) deindentLines(); }
 	inline void MoveUpLines() { if (!readOnly) moveUpLines(); }
@@ -258,9 +276,6 @@ public:
 	inline void FilterLines(std::function<std::string(std::string_view)> filter) { if (!readOnly) filterLines(filter); }
 	inline void TabsToSpaces() { if (!readOnly) tabsToSpaces(); }
 	inline void SpacesToTabs() { if (!readOnly) spacesToTabs(); }
-
-	// NOTE: functions provided to FilterSelections or FilterLines
-	//       should accept and return UTF-8 encoded strings
 
 	// color palette support
 	enum class Color : char {
@@ -315,7 +330,8 @@ public:
 		Color color = Color::text;
 	};
 
-	// iterator used in language specific tokenizers
+	// iterator used in language-specific tokenizers
+	// this iterator points to unicode codepoints
 	class Iterator {
 	public:
 		// constructors
@@ -333,12 +349,12 @@ public:
 		inline Iterator& operator++() { glyph++; return *this; }
 		inline Iterator operator++(int) { Iterator tmp = *this; glyph++; return tmp; }
 		inline size_t operator-(const Iterator& a) { return glyph - a.glyph; }
-		inline friend bool operator== (const Iterator& a, const Iterator& b) { return a.glyph == b.glyph; };
-		inline friend bool operator!= (const Iterator& a, const Iterator& b) { return !(a.glyph == b.glyph); };
-		inline friend bool operator< (const Iterator& a, const Iterator& b) { return a.glyph < b.glyph; };
-		inline friend bool operator<= (const Iterator& a, const Iterator& b) { return a.glyph <= b.glyph; };
-		inline friend bool operator> (const Iterator& a, const Iterator& b) { return a.glyph > b.glyph; };
-		inline friend bool operator>= (const Iterator& a, const Iterator& b) { return a.glyph >= b.glyph; };
+		inline friend bool operator==(const Iterator& a, const Iterator& b) { return a.glyph == b.glyph; };
+		inline friend bool operator!=(const Iterator& a, const Iterator& b) { return !(a.glyph == b.glyph); };
+		inline friend bool operator<(const Iterator& a, const Iterator& b) { return a.glyph < b.glyph; };
+		inline friend bool operator<=(const Iterator& a, const Iterator& b) { return a.glyph <= b.glyph; };
+		inline friend bool operator>(const Iterator& a, const Iterator& b) { return a.glyph > b.glyph; };
+		inline friend bool operator>=(const Iterator& a, const Iterator& b) { return a.glyph >= b.glyph; };
 
 	private:
 		// properties
@@ -371,11 +387,11 @@ public:
 		bool hasSingleQuotedStrings = false;
 		bool hasDoubleQuotedStrings = false;
 
-		// other character sequences that starts and ends strings (can be blank if language doesn't have this feature)
+		// other character sequences that start and end strings (can be blank if language doesn't have this feature)
 		std::string otherStringStart;
 		std::string otherStringEnd;
 
-		// alternate character sequences that starts and ends strings (can be blank if language doesn't have this feature)
+		// alternate character sequences that start and end strings (can be blank if language doesn't have this feature)
 		std::string otherStringAltStart;
 		std::string otherStringAltEnd;
 
@@ -392,15 +408,14 @@ public:
 		std::function<bool(ImWchar)> isPunctuation;
 
 		// functions to tokenize identifiers and numbers (can be nullptr if language doesn't have this feature)
-		// start and end refer to the characters being tokonized
-		// functions should return the an iterator to the character after the token
-		//		returning start means no token was found
+		// start and end refer to the characters being tokenized
+		// functions should return an iterator to the character after the detected token
+		// returning start means no token was found
 		std::function<Iterator(Iterator start, Iterator end)> getIdentifier;
 		std::function<Iterator(Iterator start, Iterator end)> getNumber;
 
-		// function to implement custom tokonizer
-		// if a token is found function should return the an iterator to the character after the token
-		// and set the color
+		// function to implement custom tokenizer
+		// if a token is found, function should return an iterator to the character after the token and set the color
 		std::function<Iterator(Iterator start, Iterator end, Color& color)> customTokenizer;
 
 		// predefined language definitions
@@ -421,6 +436,138 @@ public:
 	inline const Language* GetLanguage() const { return language; };
 	inline bool HasLanguage() const { return language != nullptr; }
 	inline std::string GetLanguageName() const { return language == nullptr ? "None" : language->name; }
+
+	// iterate through identifiers detected by the colorizer (based on current language)
+	inline void IterateIdentifiers(std::function<void(const std::string& identifier)> callback) { document.iterateIdentifiers(callback); }
+
+	// autocomplete state (acts as API between editor and outer application)
+	class AutoCompleteState {
+	public:
+		// current context (strings = UTF-8, columns = Nth visible column and indices = Nth codepoint)
+		// to understand the difference between column and index, think like a tab :-)
+		std::string searchTerm;
+		size_t line;
+		size_t searchTermStartColumn;
+		size_t searchTermStartIndex;
+		size_t searchTermEndColumn;
+		size_t searchTermEndIndex;
+
+		bool inIdentifier;
+		bool inNumber;
+		bool inComment;
+		bool inString;
+
+		// currently selected language (could be nullptr if no language is selected)
+		const Language* language;
+
+		// optional opaque void* provided by app when autocomplete was setup
+		void* userData;
+
+		// auto complete suggestions te be provided by app callback
+		// only the first 10 are rendered in the order provided (so app is responsible for sorting)
+
+		// the editor does not automatically include language specific keywords or identifiers in the suggestion list
+		// this is left to the application so it can be context specific in case a language server is used
+		// a pointer to the current language definition is provided so callbacks have easy access
+		std::vector<std::string> suggestions;
+	};
+
+	// autocomplete configuration (defaults are like Visual Studio Code)
+	class AutoCompleteConfig {
+	public:
+		// specifies whether typing by the user triggers autocomplete
+		bool triggersOnTyping = true;
+
+		// specifies whether the specified shortcut triggers autocomplete
+		bool triggersOnShortcut = true;
+
+		// specifies whether typing (or shortcut) in comments or strings triggers autocomplete
+		bool triggerInComments = false;
+		bool triggerInStrings = false;
+
+		// manual trigger key sequence (default is Ctrl+space on all platforms, even MacOS)
+		// remember Dear ImGui reverses Ctrl and Command on MacOS
+#if __APPLE__
+		ImGuiKeyChord triggerShortcut = ImGuiMod_Super | ImGuiKey_Space;
+#else
+		ImGuiKeyChord triggerShortcut = ImGuiMod_Ctrl | ImGuiKey_Space;
+#endif
+
+		// see if single suggestions are automatically inserted
+		bool autoInsertSingleSuggestions = false;
+
+		// delay in milliseconds between autocomplete trigger and suggestions popup
+		std::chrono::milliseconds triggerDelay{200};
+
+		// called when autocomplete is configured, active and the editor needs an updated suggestions list
+		// callback must populate and order suggestions in state object
+		// suggestion list is not cleared by editor between callbacks
+		// callback is called during the rendering loop (so don't take too long)
+
+		// if it does takes too long, application should do search in separate thread and
+		// use API to report results (see SetAutoCompleteSuggestions)
+		std::function<void(AutoCompleteState&)> callback;
+
+		// opaque void* that must be managed externally but passed to callback
+		void* userData = nullptr;
+	};
+
+	// configure and activate autocomplete (passing nullptr deactivates it)
+	inline void SetAutoCompleteConfig(const AutoCompleteConfig* config) { autocomplete.setConfig(config); }
+
+	// option to specify autocomplete suggestions later (in case a callback takes to long and lookup is handled in a separate thread)
+	// this call is not threadsafe and must be called from the rendering thread (you must synchronize with your lookup thread yourself)
+	inline void SetAutoCompleteSuggestions(const std::vector<std::string>& suggestions) { autocomplete.setSuggestions(suggestions); }
+
+	// utility class to support autocomplete
+	// this is not used by default but can be used in autocomplete callbacks (see example app)
+	class Trie {
+	public:
+		// constructor
+		Trie() { clear(); }
+
+		// clear word tree
+		inline void clear() { root = std::make_unique<Node>(); }
+
+		// insert word (UTF-8 encoded) into tree
+		void insert(const std::string_view& word);
+
+		// populate list of suggestions based on provided search term (which is UTF-8 encoded)
+		// maxSkippedLetters is a the largest number of letters that can be skipped to find the next match
+		// this allows for missing letters (out of order letters are not taken into account)
+		void findSuggestions(std::vector<std::string>& suggestions, const std::string_view& searchTerm, size_t maxSkippedLetters=2);
+
+	private:
+		// definition of single node in the word graph
+		struct Node {
+			std::unordered_map<ImWchar, std::unique_ptr<Node>> children;
+			std::string word;
+		};
+
+		// the root node
+		std::unique_ptr<Node> root;
+
+		// maximum number of letters that can be skipped skip in matching algorithm
+		size_t maxSkip;
+
+		// search term as codepoint vector
+		std::vector<ImWchar> searchCodepoints;
+
+		// possible autocomplete candidates
+		struct Candidate {
+			Candidate(const Node* n, size_t c) : node(n), cost(c) {}
+			bool operator<(const Candidate& rhs) const { return cost < rhs.cost; }
+			bool operator==(const Candidate& rhs) const { return node == rhs.node; }
+			const Node* node;
+			size_t cost;
+		};
+
+		std::vector<Candidate> candidates;
+
+		// utility functions
+		void evaluateNode(const Node* node, size_t index, size_t cost, size_t skip);
+		void addCandidates(const Node* node, size_t cost);
+	};
 
 	// support functions for unicode codepoints
 	class CodePoint {
@@ -638,6 +785,7 @@ protected:
 		inline size_t getMainIndex() const { return main; }
 		inline Cursor& getCurrent() { return at(current); }
 		inline size_t getCurrentIndex() const { return current; }
+		inline iterator getMainAsIterator() { return begin() + main; }
 		inline iterator getCurrentAsIterator() { return begin() + current; }
 
 		// update cursors
@@ -765,6 +913,9 @@ protected:
 		void* getUserData(int line) const;
 		void iterateUserData(std::function<void(int line, void* data)> callback) const;
 
+		// iterate through document to find identifiers
+		void iterateIdentifiers(std::function<void(const std::string& identifier)> callback);
+
 		// utility functions
 		bool isWholeWord(Coordinate start, Coordinate end) const;
 		inline bool isEndOfLine(Coordinate from) const { return getIndex(from) == at(from.line).size(); }
@@ -853,9 +1004,11 @@ protected:
 		inline size_t getUndoIndex() const { return undoIndex; }
 		inline bool canUndo() const { return undoIndex > 0; }
 		inline bool canRedo() const { return undoIndex < size(); }
+		inline size_t getVersion() const { return version; }
 
 	private:
 		size_t undoIndex = 0;
+		size_t version = 0;
 	} transactions;
 
 	// text colorizer (handles language tokenizing)
@@ -892,6 +1045,7 @@ protected:
 		inline bool isAround(Coordinate location) const { return start < location && end >= location; }
 	};
 
+	// class responsible for matching brackets
 	class Bracketeer : public std::vector<BracketPair> {
 	public:
 		// reset the bracketeer
@@ -914,6 +1068,51 @@ protected:
 				glyph.color == Color::matchingBracketError;
 		}
 	} bracketeer;
+
+	// autocomplete class
+	class Autocomplete {
+	public:
+		// set the autocomplete configuration
+		void setConfig(const AutoCompleteConfig* c);
+
+		// request autocomplete mode based on triggers (and if allowed by current state)
+		// return value indicates whether autocomplete was initiated
+		bool startTyping(Cursors& cursors);
+		bool startShortcut(Cursors& cursors);
+
+		// cancel autocomplete mode (if required)
+		void cancel();
+
+		// update autocomplete state and render (if required)
+		bool render(Document& document, Cursors& cursors, const Language* language, float textOffset, ImVec2 glyphSize);
+
+		// specify a new set of suggestions
+		void setSuggestions(const std::vector<std::string>& suggestions);
+
+		// get information
+		inline bool isActive() const { return active; }
+		inline ImGuiKeyChord getTriggerShortcut() const { return configuration.triggerShortcut; }
+		inline Coordinate getStart() const { return startLocation; }
+		inline std::string getReplacement() { return currentSelection < state.suggestions.size() ? state.suggestions[currentSelection] : ""; }
+
+	private:
+		// properties
+		bool configured = false;
+		bool active = false;
+		bool requestActivation = false;
+		bool requestDeactivation = false;
+		Coordinate currentLocation;
+		Coordinate startLocation;
+		std::chrono::system_clock::time_point activationTime;
+		AutoCompleteConfig configuration;
+		AutoCompleteState state;
+		size_t currentSelection = 0;
+
+		// support functions
+		bool start(Cursors& cursors);
+		void updateState(Document& document, const Language* language);
+		void refreshSuggestions();
+	} autocomplete;
 
 	// access the editor's text
 	void setText(const std::string_view& text);
@@ -969,6 +1168,7 @@ protected:
 
 	void replaceTextInCurrentCursor(const std::string_view& text);
 	void replaceTextInAllCursors(const std::string_view& text);
+	void replaceSectionText(const Coordinate& start, const Coordinate& end, const std::string_view& text);
 
 	void openFindReplace();
 	void closeFindReplace();
@@ -1023,7 +1223,7 @@ protected:
 
 	// transaction functions
 	// note that strings must be UTF-8 encoded
-	std::shared_ptr<Transaction> startTransaction();
+	std::shared_ptr<Transaction> startTransaction(bool cancelsAutoComplete=true);
 	bool endTransaction(std::shared_ptr<Transaction> transaction);
 
 	void insertTextIntoAllCursors(std::shared_ptr<Transaction> transaction, const std::string_view& text);
@@ -1082,7 +1282,7 @@ protected:
 	static constexpr int textMargin = 2;
 	static constexpr int cursorWidth = 1;
 
-	// find and replace support
+	// find and replace context
 	std::string findButtonLabel = "Find";
 	std::string findAllButtonLabel = "Find All";
 	std::string replaceButtonLabel = "Replace";
@@ -1104,6 +1304,10 @@ protected:
 	bool scrolling = false;
 	ImVec2 scrollStart;
 	bool showPanScrollIndicator = true;
+	std::function<void()> changeCallback;
+	std::chrono::milliseconds changeCallbackDelay;
+	std::chrono::system_clock::time_point changeReportTime;
+	bool changeDetected = false;
 
 	// color palette support
 	void updatePalette();

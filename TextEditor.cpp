@@ -40,9 +40,13 @@ void TextEditor::setText(const std::string_view &text) {
 	document.setText(text);
 	transactions.reset();
 	bracketeer.reset();
+	colorizer.updateEntireDocument(document, language);
 	cursors.clearAll();
 	clearMarkers();
 	makeCursorVisible();
+
+	showMatchingBracketsChanged = false;
+	languageChanged = false;
 }
 
 
@@ -51,6 +55,9 @@ void TextEditor::setText(const std::string_view &text) {
 //
 
 void TextEditor::render(const char* title, const ImVec2& size, bool border) {
+	// get current transaction version
+	auto transActionVersion = transactions.getVersion();
+
 	// update color palette (if required)
 	if (paletteAlpha != ImGui::GetStyle().Alpha) {
 		updatePalette();
@@ -168,7 +175,7 @@ void TextEditor::render(const char* title, const ImVec2& size, bool border) {
 	handleKeyboardInputs();
 	handleMouseInteractions();
 
-	// ensure cursors are up to date (sorted and merged if required)
+	// ensure cursors are up to date (sort and merge if required)
 	if (cursors.anyHasUpdate()) {
 		cursors.update();
 	}
@@ -228,6 +235,29 @@ void TextEditor::render(const char* title, const ImVec2& size, bool border) {
 
 	// render find/replace popup
 	renderFindReplace(pos, visibleSize.x - verticalScrollBarSize);
+
+	// render autocomplete popup
+	if (autocomplete.render(document, cursors, language, textOffset, glyphSize)) {
+		// user picked a suggestion so insert it
+		auto start = autocomplete.getStart();
+		auto end = document.findWordEnd(start, true);
+		auto replacement = autocomplete.getReplacement();
+		replaceSectionText(start, end, replacement);
+	}
+
+	// handle change tracking if there is a change callback in place
+	if (changeCallback) {
+		if (changeDetected) {
+			if (std::chrono::system_clock::now() > changeReportTime) {
+				changeCallback();
+				changeDetected = false;
+			}
+
+		} else if (transactions.getVersion() != transActionVersion) {
+			changeDetected = true;
+			changeReportTime = std::chrono::system_clock::now() + changeCallbackDelay;
+		}
+	}
 
 	ImGui::EndChild();
 	ImGui::PopStyleColor();
@@ -627,202 +657,6 @@ void TextEditor::renderPanScrollIndicator() {
 
 
 //
-//	latchButton
-//
-
-static bool latchButton(const char* label, bool* value, const ImVec2& size) {
-	auto changed = false;
-	ImVec4* colors = ImGui::GetStyle().Colors;
-
-	if (*value) {
-		ImGui::PushStyleColor(ImGuiCol_Button, colors[ImGuiCol_ButtonActive]);
-		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, colors[ImGuiCol_ButtonActive]);
-		ImGui::PushStyleColor(ImGuiCol_ButtonActive, colors[ImGuiCol_TableBorderLight]);
-
-	} else {
-		ImGui::PushStyleColor(ImGuiCol_Button, colors[ImGuiCol_TableBorderLight]);
-		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, colors[ImGuiCol_TableBorderLight]);
-		ImGui::PushStyleColor(ImGuiCol_ButtonActive, colors[ImGuiCol_ButtonActive]);
-	}
-
-	ImGui::Button(label, size);
-
-	if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
-		*value = !*value;
-		changed = true;
-	}
-
-	ImGui::PopStyleColor(3);
-	return changed;
-}
-
-
-//
-//	inputString
-//
-
-static bool inputString(const char* label, std::string* value, ImGuiInputTextFlags flags=ImGuiInputTextFlags_None) {
-	flags |=
-		ImGuiInputTextFlags_NoUndoRedo |
-		ImGuiInputTextFlags_CallbackResize;
-
-	return ImGui::InputText(label, (char*) value->c_str(), value->capacity() + 1, flags, [](ImGuiInputTextCallbackData* data) {
-		if (data->EventFlag == ImGuiInputTextFlags_CallbackResize) {
-			std::string* value = (std::string*) data->UserData;
-			value->resize(data->BufTextLen);
-			data->Buf = (char*) value->c_str();
-		}
-
-		return 0;
-	}, value);
-}
-
-
-//
-//	TextEditor::renderFindReplace
-//
-
-void TextEditor::renderFindReplace(ImVec2 pos, float width) {
-	// render find/replace window (if required)
-	if (findReplaceVisible) {
-		// save current screen position
-		auto currentScreenPosition = ImGui::GetCursorScreenPos();
-
-		// calculate sizes
-		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 4.0f));
-		auto& style = ImGui::GetStyle();
-		auto fieldWidth = 250.0f;
-
-		auto button1Width = ImGui::CalcTextSize(findButtonLabel.c_str()).x + style.ItemSpacing.x * 2.0f;
-		auto button2Width = ImGui::CalcTextSize(findAllButtonLabel.c_str()).x + style.ItemSpacing.x * 2.0f;
-		auto optionWidth = ImGui::CalcTextSize("Aa").x + style.ItemSpacing.x * 2.0f;
-
-		if (!readOnly) {
-			button1Width = std::max(button1Width, ImGui::CalcTextSize(replaceButtonLabel.c_str()).x + style.ItemSpacing.x * 2.0f);
-			button2Width = std::max(button2Width, ImGui::CalcTextSize(replaceAllButtonLabel.c_str()).x + style.ItemSpacing.x * 2.0f);
-		}
-
-		auto windowHeight =
-			style.ChildBorderSize * 2.0f +
-			style.WindowPadding.y * 2.0f +
-			ImGui::GetFrameHeight() +
-			(readOnly ? 0.0f : (style.ItemSpacing.y + ImGui::GetFrameHeight()));
-
-		auto windowWidth =
-			style.ChildBorderSize * 2.0f +
-			style.WindowPadding.x * 2.0f +
-			fieldWidth + style.ItemSpacing.x +
-			button1Width + style.ItemSpacing.x +
-			button2Width + style.ItemSpacing.x +
-			optionWidth * 3.0f + style.ItemSpacing.x * 2.0f;
-
-		// create window
-		ImGui::SetNextWindowPos(ImVec2(
-			pos.x + width - windowWidth - style.ItemSpacing.x,
-			pos.y + style.ItemSpacing.y * 2.0f));
-
-		ImGui::SetNextWindowSize(ImVec2(windowWidth, windowHeight));
-		ImGui::SetNextWindowBgAlpha(0.75f);
-
-		ImGui::BeginChild("find-replace", ImVec2(windowWidth, windowHeight), ImGuiChildFlags_Borders);
-		ImGui::SetNextItemWidth(fieldWidth);
-
-		if (focusOnFind) {
-			ImGui::SetKeyboardFocusHere();
-			focusOnFind = false;
-		}
-
-		if (inputString("###find", &findText, ImGuiInputTextFlags_AutoSelectAll)) {
-			if (findText.size()) {
-				selectFirstOccurrenceOf(findText, caseSensitiveFind, wholeWordFind);
-
-			} else {
-				cursors.clearAll();
-			}
-		}
-
-		if (ImGui::IsItemDeactivated() && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter))){
-			focusOnEditor = true;
-		}
-
-		bool disableFindButtons = !findText.size();
-
-		if (disableFindButtons) {
-			ImGui::BeginDisabled();
-		}
-
-		ImGui::SameLine();
-
-		if (ImGui::Button(findButtonLabel.c_str(), ImVec2(button1Width, 0.0f))) {
-			find();
-		}
-
-		ImGui::SameLine();
-
-		if (ImGui::Button(findAllButtonLabel.c_str(), ImVec2(button2Width, 0.0f))) {
-			findAll();
-		}
-
-		if (disableFindButtons) {
-			ImGui::EndDisabled();
-		}
-
-		ImGui::SameLine();
-
-		if (latchButton("Aa", &caseSensitiveFind, ImVec2(optionWidth, 0.0f))) {
-			find();
-		}
-
-		ImGui::SameLine();
-
-		if (latchButton("[]", &wholeWordFind, ImVec2(optionWidth, 0.0f))) {
-			find();
-		}
-
-		ImGui::SameLine();
-
-		if (ImGui::Button("x", ImVec2(optionWidth, 0.0f))) {
-			closeFindReplace();
-		}
-
-		if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-			closeFindReplace();
-		}
-
-		if (!readOnly) {
-			ImGui::SetNextItemWidth(fieldWidth);
-			inputString("###replace", &replaceText);
-			ImGui::SameLine();
-
-			bool disableReplaceButtons = !findText.size() || !replaceText.size();
-
-			if (disableReplaceButtons) {
-				ImGui::BeginDisabled();
-			}
-
-			if (ImGui::Button(replaceButtonLabel.c_str(), ImVec2(button1Width, 0.0f))) {
-				replace();
-			}
-
-			ImGui::SameLine();
-
-			if (ImGui::Button(replaceAllButtonLabel.c_str(), ImVec2(button2Width, 0.0f))) {
-				replaceAll();
-			}
-
-			if (disableReplaceButtons) {
-				ImGui::EndDisabled();
-			}
-		}
-
-		ImGui::EndChild();
-		ImGui::PopStyleVar();
-		ImGui::SetCursorScreenPos(currentScreenPosition);
-	}
-}
-
-
-//
 //	TextEditor::handleKeyboardInputs
 //
 
@@ -855,6 +689,20 @@ void TextEditor::handleKeyboardInputs() {
 		auto isShiftAlt = !ctrl && shift && alt;
 		auto isOptionalCtrlShift = !alt;
 	#endif
+
+		// ignore specific keys when autocomplete is active, they will be handled later
+		if (autocomplete.isActive()) {
+			for (auto key : {ImGuiKey_Escape, ImGuiKey_Tab, ImGuiKey_Enter, ImGuiKey_KeypadEnter, ImGuiKey_UpArrow, ImGuiKey_DownArrow}) {
+				if (ImGui::IsKeyPressed(key)) {
+					return;
+				}
+			}
+		}
+
+		// ignore escape key when find/replace window is visible, it will be handled later
+		if (findReplaceVisible && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+			return;
+		}
 
 		// cursor movements and selections
 		if (isOptionalShift && ImGui::IsKeyPressed(ImGuiKey_UpArrow)) { moveUp(1, shift); }
@@ -912,6 +760,13 @@ void TextEditor::handleKeyboardInputs() {
 		else if (isShiftShortcut && ImGui::IsKeyPressed(ImGuiKey_F)) { findAll(); }
 		else if (isShortcut && ImGui::IsKeyPressed(ImGuiKey_G)) { findNext(); }
 
+		// autocomplete support
+		else if (!readOnly && ImGui::IsKeyChordPressed(autocomplete.getTriggerShortcut())) {
+			if (autocomplete.startShortcut(cursors)) {
+				makeCursorVisible();
+			}
+		}
+
 		// change insert mode
 		else if (isNoModifiers && ImGui::IsKeyPressed(ImGuiKey_Insert)) { overwrite = !overwrite; }
 
@@ -936,7 +791,7 @@ void TextEditor::handleKeyboardInputs() {
 		}
 
 		// handle escape key
-		else if (!findReplaceVisible && ImGui::IsKeyPressed(ImGuiKey_Escape) && cursors.hasMultiple()) {
+		else if (ImGui::IsKeyPressed(ImGuiKey_Escape) && cursors.hasMultiple()) {
 			cursors.clearAdditional();
 		}
 
@@ -1145,9 +1000,11 @@ void TextEditor::handleMouseInteractions() {
 					if (extendCursor) {
 						auto& cursor = cursors.getCurrent();
 						cursor.update(cursor.getInteractiveEnd() < cursor.getInteractiveStart() ? start : end);
+						autocomplete.cancel();
 
 					} else if (addCursor) {
 						cursors.addCursor(start, end);
+						autocomplete.cancel();
 
 					} else {
 						cursors.setCursor(start, end);
@@ -1159,9 +1016,11 @@ void TextEditor::handleMouseInteractions() {
 					// handle mouse clicks in text
 					if (extendCursor) {
 						cursors.updateCurrentCursor(cursorCoordinate);
+						autocomplete.cancel();
 
 					} else if (addCursor) {
 						cursors.addCursor(cursorCoordinate);
+						autocomplete.cancel();
 
 					} else {
 						cursors.setCursor(cursorCoordinate);
@@ -1453,239 +1312,6 @@ void TextEditor::scrollToLine(int line, Scroll alignment) {
 
 
 //
-//	TextEditor::selectFirstOccurrenceOf
-//
-
-void TextEditor::selectFirstOccurrenceOf(const std::string_view& text, bool caseSensitive, bool wholeWord) {
-	Coordinate start, end;
-
-	if (document.findText(Coordinate(0, 0), text, caseSensitive, wholeWord, start, end)) {
-		cursors.setCursor(start, end);
-		makeCursorVisible();
-
-	} else {
-		cursors.clearAdditional(true);
-	}
-}
-
-
-//
-//	TextEditor::selectNextOccurrenceOf
-//
-
-void TextEditor::selectNextOccurrenceOf(const std::string_view& text, bool caseSensitive, bool wholeWord) {
-	Coordinate start, end;
-
-	if (document.findText(cursors.getCurrent().getSelectionEnd(), text, caseSensitive, wholeWord, start, end)) {
-		cursors.setCursor(start, end);
-		makeCursorVisible();
-
-	} else {
-		cursors.clearAdditional(true);
-	}
-}
-
-
-//
-//	TextEditor::selectAllOccurrencesOf
-//
-
-void TextEditor::selectAllOccurrencesOf(const std::string_view& text, bool caseSensitive, bool wholeWord) {
-	Coordinate start, end;
-
-	if (document.findText(Coordinate(0, 0), text, caseSensitive, wholeWord, start, end)) {
-		cursors.setCursor(start, end);
-		bool done = false;
-
-		while (!done) {
-			Coordinate nextStart, nextEnd;
-			document.findText(cursors.getCurrent().getSelectionEnd(), text, caseSensitive, wholeWord, nextStart, nextEnd);
-
-			if (nextStart == start && nextEnd == end) {
-				done = true;
-
-			} else {
-				cursors.addCursor(nextStart, nextEnd);
-			}
-		}
-
-		makeCursorVisible();
-
-	} else {
-		cursors.clearAdditional(true);
-	}
-}
-
-
-//
-//	TextEditor::addNextOccurrence
-//
-
-void TextEditor::addNextOccurrence() {
-
-	auto cursor = cursors.getCurrent();
-	auto text = document.getSectionText(cursor.getSelectionStart(), cursor.getSelectionEnd());
-	Coordinate start, end;
-
-	if (document.findText(cursor.getSelectionEnd(), text, true, false, start, end)) {
-		cursors.addCursor(start, end);
-	}
-}
-
-
-//
-//	TextEditor::addNextOccurrences
-//
-
-void TextEditor::selectAllOccurrences() {
-	auto cursor = cursors.getCurrent();
-	auto text = document.getSectionText(cursor.getSelectionStart(), cursor.getSelectionEnd());
-	selectAllOccurrencesOf(text, true, false);
-}
-
-
-//
-//	TextEditor::replaceTextInCurrentCursor
-//
-
-void TextEditor::replaceTextInCurrentCursor(const std::string_view& text) {
-	auto transaction = startTransaction();
-
-	// first delete old text
-	auto cursor = cursors.getCurrentAsIterator();
-	auto start = cursor->getSelectionStart();
-	auto end = cursor->getSelectionEnd();
-	deleteText(transaction, start, end);
-	cursors.adjustForDelete(cursor, start, end);
-
-	// now insert new text
-	Coordinate newEnd = insertText(transaction, start, text);
-	cursor->update(newEnd, false);
-	cursors.adjustForInsert(cursor, start, newEnd);
-
-	endTransaction(transaction);
-}
-
-
-//
-//	TextEditor::replaceTextInAllCursors
-//
-
-void TextEditor::replaceTextInAllCursors(const std::string_view& text) {
-	auto transaction = startTransaction();
-	insertTextIntoAllCursors(transaction, text);
-	endTransaction(transaction);
-}
-
-
-//
-//	TextEditor::openFindReplace
-//
-
-void TextEditor::openFindReplace() {
-	// get main cursor location
-	auto cursor = cursors.getMain();
-
-	// see if we have a current selection that's on one line
-	if (cursor.hasSelection()) {
-		if (cursor.getSelectionStart().line == cursor.getSelectionEnd().line) {
-			// use it as the default search
-			findText = document.getSectionText(cursor.getSelectionStart(), cursor.getSelectionEnd());
-		}
-
-	} else {
-		// if cursor is inside "real" word, use that as the default
-		auto start = document.findWordStart(cursor.getSelectionStart(), true);
-		auto end = document.findWordEnd(cursor.getSelectionStart(), true);
-
-		if (start != end) {
-			findText = document.getSectionText(start, end);
-		}
-	}
-
-	findReplaceVisible = true;
-	focusOnFind = true;
-}
-
-
-//
-//	TextEditor::closeFindReplace
-//
-
-void TextEditor::closeFindReplace() {
-	findReplaceVisible = false;
-	focusOnFind = false;
-	focusOnEditor = true;
-}
-
-
-//
-//	TextEditor::find
-//
-
-void TextEditor::find() {
-	if (findText.size()) {
-		selectNextOccurrenceOf(findText, caseSensitiveFind, wholeWordFind);
-		focusOnEditor = true;
-	}
-}
-
-
-//
-//	TextEditor::findNext
-//
-
-void TextEditor::findNext() {
-	if (findText.size()) {
-		selectNextOccurrenceOf(findText, caseSensitiveFind, wholeWordFind);
-		focusOnEditor = true;
-	}
-}
-
-
-//
-//	TextEditor::findAll
-//
-
-void TextEditor::findAll() {
-	if (findText.size()) {
-		selectAllOccurrencesOf(findText, caseSensitiveFind, wholeWordFind);
-		focusOnEditor = true;
-	}
-}
-
-
-//
-//	TextEditor::replace
-//
-
-void TextEditor::replace() {
-	if (findText.size()) {
-		if (!cursors.anyHasSelection()) {
-			selectNextOccurrenceOf(findText, caseSensitiveFind, wholeWordFind);
-		}
-
-		replaceTextInCurrentCursor(replaceText);
-		selectNextOccurrenceOf(findText, caseSensitiveFind, wholeWordFind);
-		focusOnEditor = true;
-	}
-}
-
-
-//
-//	TextEditor::replaceAll
-//
-
-void TextEditor::replaceAll() {
-	if (findText.size()) {
-		selectAllOccurrencesOf(findText, caseSensitiveFind, wholeWordFind);
-		replaceTextInAllCursors(replaceText);
-		focusOnEditor = true;
-	}
-}
-
-
-//
 //	TextEditor::addMarker
 //
 
@@ -1822,7 +1448,7 @@ void TextEditor::moveTo(Coordinate coordinate, bool select) {
 //
 
 void TextEditor::handleCharacter(ImWchar character) {
-	auto transaction = startTransaction();
+	auto transaction = startTransaction(false);
 
 	auto opener = character;
 	auto isPaired = !overwrite && completePairedGlyphs && CodePoint::isPairOpener(opener);
@@ -1904,6 +1530,12 @@ void TextEditor::handleCharacter(ImWchar character) {
 	}
 
 	endTransaction(transaction);
+
+	if (CodePoint::isWord(character)) {
+		if (autocomplete.startTyping(cursors)) {
+			makeCursorVisible();
+		}
+	}
 }
 
 
@@ -1912,7 +1544,7 @@ void TextEditor::handleCharacter(ImWchar character) {
 //
 
 void TextEditor::handleBackspace(bool wordMode) {
-	auto transaction = startTransaction();
+	auto transaction = startTransaction(false);
 
 	// remove selections or characters to the left of the cursor
 	for (auto cursor = cursors.begin(); cursor < cursors.end(); cursor++) {
@@ -1932,7 +1564,7 @@ void TextEditor::handleBackspace(bool wordMode) {
 //
 
 void TextEditor::handleDelete(bool wordMode) {
-	auto transaction = startTransaction();
+	auto transaction = startTransaction(false);
 
 	// remove selections or characters to the right of the cursor
 	for (auto cursor = cursors.begin(); cursor < cursors.end(); cursor++) {
@@ -2058,7 +1690,7 @@ void TextEditor::deindentLines() {
 				index++;
 			}
 
-			// delete that whitespace if required
+			// delete that whitespace (if required)
 			Coordinate deleteStart{line, 0};
 			Coordinate deleteEnd{line, document.getColumn(line, index)};
 
@@ -2080,7 +1712,7 @@ void TextEditor::deindentLines() {
 void TextEditor::moveUpLines() {
 	// don't move up if first line is in one of the cursors
 	if (cursors[0].getSelectionStart().line != 0) {
-		auto transaction = startTransaction();
+ 		auto transaction = startTransaction();
 
 		for (auto cursor = cursors.begin(); cursor < cursors.end(); cursor++) {
 			auto start = cursor->getSelectionStart();
@@ -2441,7 +2073,11 @@ void TextEditor::spacesToTabs() {
 //	TextEditor::startTransaction
 //
 
-std::shared_ptr<TextEditor::Transaction> TextEditor::startTransaction() {
+std::shared_ptr<TextEditor::Transaction> TextEditor::startTransaction(bool cancelsAutoComplete) {
+	if (cancelsAutoComplete) {
+		autocomplete.cancel();
+	}
+
 	std::shared_ptr<Transaction> transaction = Transactions::create();
 	transaction->setBeforeState(cursors);
 	return transaction;
@@ -3404,12 +3040,7 @@ TextEditor::Coordinate TextEditor::Document::findWordStart(Coordinate from, bool
 
 	} else {
 		auto index = getIndex(from);
-
-		if (index == lineSize) {
-			index--;
-		}
-
-		auto firstCharacter = line[index].codepoint;
+		auto firstCharacter = line[index - 1].codepoint;
 
 		if (!wordOnly && CodePoint::isWhiteSpace(firstCharacter)) {
 			while (index > 0 && CodePoint::isWhiteSpace(line[index - 1].codepoint)) {
@@ -3590,6 +3221,41 @@ void* TextEditor::Document::getUserData(int line) const {
 void TextEditor::Document::iterateUserData(std::function<void(int line, void* data)> callback) const {
 	for (size_t i = 0; i < size(); i++) {
 		callback(static_cast<int>(i), at(i).userData);
+	}
+}
+
+
+//
+//	TextEditor::Document::iterateIdentifiers
+//
+
+static inline bool isIdentifier(TextEditor::Color color) {
+	return
+		color == TextEditor::Color::identifier ||
+		color == TextEditor::Color::knownIdentifier;
+}
+
+void TextEditor::Document::iterateIdentifiers(std::function<void(const std::string&)> callback) {
+	for (size_t i = 0; i < size(); i++) {
+		auto p = at(i).begin();
+		auto end = at(i).end();
+		char utf8[4];
+
+		while (p < end) {
+			if (isIdentifier(p->color)) {
+				std::string identifier;
+
+				while (p < end && isIdentifier(p->color)) {
+					identifier.append(std::string_view(utf8, CodePoint::write(utf8, p->codepoint)));
+					p++;
+				}
+
+				callback(identifier);
+
+			} else {
+				p++;
+			}
+		}
 	}
 }
 
@@ -3830,6 +3496,7 @@ void TextEditor::Document::clearDocument() {
 void TextEditor::Transactions::reset() {
 	clear();
 	undoIndex = 0;
+	version = 0;
 }
 
 
@@ -3841,6 +3508,7 @@ void TextEditor::Transactions::add(std::shared_ptr<Transaction> transaction) {
 	resize(undoIndex);
 	push_back(transaction);
 	undoIndex++;
+	version++;
 }
 
 
@@ -3849,7 +3517,7 @@ void TextEditor::Transactions::add(std::shared_ptr<Transaction> transaction) {
 //
 
 void TextEditor::Transactions::undo(Document& document, Cursors& cursors) {
-	auto& transaction = at(--undoIndex);
+	auto transaction = at(--undoIndex);
 
 	for (auto action = transaction->rbegin(); action < transaction->rend(); action++) {
 		if (action->type == Action::Type::insertText) {
@@ -3861,6 +3529,7 @@ void TextEditor::Transactions::undo(Document& document, Cursors& cursors) {
 	}
 
 	cursors = transaction->getBeforeState();
+	version++;
 }
 
 
@@ -3869,9 +3538,9 @@ void TextEditor::Transactions::undo(Document& document, Cursors& cursors) {
 //
 
 void TextEditor::Transactions::redo(Document& document, Cursors& cursors) {
-	auto& transaction = at(undoIndex++);
+	auto transaction = at(undoIndex++);
 
-	for (auto action = transaction->rbegin(); action < transaction->rend(); action++) {
+	for (auto action = transaction->begin(); action < transaction->end(); action++) {
 		if (action->type == Action::Type::insertText) {
 			document.insertText(action->start, action->text);
 
@@ -3881,6 +3550,7 @@ void TextEditor::Transactions::redo(Document& document, Cursors& cursors) {
 	}
 
 	cursors = transaction->getAfterState();
+	version++;
 }
 
 
@@ -4341,6 +4011,920 @@ TextEditor::Bracketeer::iterator TextEditor::Bracketeer::getInnerCurlyBrackets(C
 	}
 
 	return brackets;
+}
+
+
+//
+//	latchButton
+//
+
+static bool latchButton(const char* label, bool* value, const ImVec2& size) {
+	auto changed = false;
+	ImVec4* colors = ImGui::GetStyle().Colors;
+
+	if (*value) {
+		ImGui::PushStyleColor(ImGuiCol_Button, colors[ImGuiCol_ButtonActive]);
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, colors[ImGuiCol_ButtonActive]);
+		ImGui::PushStyleColor(ImGuiCol_ButtonActive, colors[ImGuiCol_TableBorderLight]);
+
+	} else {
+		ImGui::PushStyleColor(ImGuiCol_Button, colors[ImGuiCol_TableBorderLight]);
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, colors[ImGuiCol_TableBorderLight]);
+		ImGui::PushStyleColor(ImGuiCol_ButtonActive, colors[ImGuiCol_ButtonActive]);
+	}
+
+	ImGui::Button(label, size);
+
+	if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+		*value = !*value;
+		changed = true;
+	}
+
+	ImGui::PopStyleColor(3);
+	return changed;
+}
+
+
+//
+//	inputString
+//
+
+static bool inputString(const char* label, std::string* value, ImGuiInputTextFlags flags=ImGuiInputTextFlags_None) {
+	flags |=
+		ImGuiInputTextFlags_NoUndoRedo |
+		ImGuiInputTextFlags_CallbackResize;
+
+	return ImGui::InputText(label, (char*) value->c_str(), value->capacity() + 1, flags, [](ImGuiInputTextCallbackData* data) {
+		if (data->EventFlag == ImGuiInputTextFlags_CallbackResize) {
+			std::string* value = (std::string*) data->UserData;
+			value->resize(data->BufTextLen);
+			data->Buf = (char*) value->c_str();
+		}
+
+		return 0;
+	}, value);
+}
+
+
+//
+//	TextEditor::renderFindReplace
+//
+
+void TextEditor::renderFindReplace(ImVec2 pos, float width) {
+	// render find/replace window (if required)
+	if (findReplaceVisible) {
+		// save current screen position
+		auto currentScreenPosition = ImGui::GetCursorScreenPos();
+
+		// calculate sizes
+		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 4.0f));
+		auto& style = ImGui::GetStyle();
+		auto fieldWidth = 250.0f;
+
+		auto button1Width = ImGui::CalcTextSize(findButtonLabel.c_str()).x + style.ItemSpacing.x * 2.0f;
+		auto button2Width = ImGui::CalcTextSize(findAllButtonLabel.c_str()).x + style.ItemSpacing.x * 2.0f;
+		auto optionWidth = ImGui::CalcTextSize("Aa").x + style.ItemSpacing.x * 2.0f;
+
+		if (!readOnly) {
+			button1Width = std::max(button1Width, ImGui::CalcTextSize(replaceButtonLabel.c_str()).x + style.ItemSpacing.x * 2.0f);
+			button2Width = std::max(button2Width, ImGui::CalcTextSize(replaceAllButtonLabel.c_str()).x + style.ItemSpacing.x * 2.0f);
+		}
+
+		auto windowHeight =
+			style.ChildBorderSize * 2.0f +
+			style.WindowPadding.y * 2.0f +
+			ImGui::GetFrameHeight() +
+			(readOnly ? 0.0f : (style.ItemSpacing.y + ImGui::GetFrameHeight()));
+
+		auto windowWidth =
+			style.ChildBorderSize * 2.0f +
+			style.WindowPadding.x * 2.0f +
+			fieldWidth + style.ItemSpacing.x +
+			button1Width + style.ItemSpacing.x +
+			button2Width + style.ItemSpacing.x +
+			optionWidth * 3.0f + style.ItemSpacing.x * 2.0f;
+
+		// create window
+		ImGui::SetNextWindowPos(ImVec2(
+			pos.x + width - windowWidth - style.ItemSpacing.x,
+			pos.y + style.ItemSpacing.y * 2.0f));
+
+		ImGui::SetNextWindowSize(ImVec2(windowWidth, windowHeight));
+		ImGui::SetNextWindowBgAlpha(0.75f);
+
+		ImGui::BeginChild("find-replace", ImVec2(windowWidth, windowHeight), ImGuiChildFlags_Borders);
+		ImGui::SetNextItemWidth(fieldWidth);
+
+		if (focusOnFind) {
+			ImGui::SetKeyboardFocusHere();
+			focusOnFind = false;
+		}
+
+		if (inputString("###find", &findText, ImGuiInputTextFlags_AutoSelectAll)) {
+			if (findText.size()) {
+				selectFirstOccurrenceOf(findText, caseSensitiveFind, wholeWordFind);
+
+			} else {
+				cursors.clearAll();
+			}
+		}
+
+		if (ImGui::IsItemDeactivated() && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter))){
+			focusOnEditor = true;
+		}
+
+		bool disableFindButtons = !findText.size();
+
+		if (disableFindButtons) {
+			ImGui::BeginDisabled();
+		}
+
+		ImGui::SameLine();
+
+		if (ImGui::Button(findButtonLabel.c_str(), ImVec2(button1Width, 0.0f))) {
+			find();
+		}
+
+		ImGui::SameLine();
+
+		if (ImGui::Button(findAllButtonLabel.c_str(), ImVec2(button2Width, 0.0f))) {
+			findAll();
+		}
+
+		if (disableFindButtons) {
+			ImGui::EndDisabled();
+		}
+
+		ImGui::SameLine();
+
+		if (latchButton("Aa", &caseSensitiveFind, ImVec2(optionWidth, 0.0f))) {
+			find();
+		}
+
+		ImGui::SameLine();
+
+		if (latchButton("[]", &wholeWordFind, ImVec2(optionWidth, 0.0f))) {
+			find();
+		}
+
+		ImGui::SameLine();
+
+		if (ImGui::Button("x", ImVec2(optionWidth, 0.0f))) {
+			closeFindReplace();
+		}
+
+		if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+			closeFindReplace();
+		}
+
+		if (!readOnly) {
+			ImGui::SetNextItemWidth(fieldWidth);
+			inputString("###replace", &replaceText);
+			ImGui::SameLine();
+
+			bool disableReplaceButtons = !findText.size() || !replaceText.size();
+
+			if (disableReplaceButtons) {
+				ImGui::BeginDisabled();
+			}
+
+			if (ImGui::Button(replaceButtonLabel.c_str(), ImVec2(button1Width, 0.0f))) {
+				replace();
+			}
+
+			ImGui::SameLine();
+
+			if (ImGui::Button(replaceAllButtonLabel.c_str(), ImVec2(button2Width, 0.0f))) {
+				replaceAll();
+			}
+
+			if (disableReplaceButtons) {
+				ImGui::EndDisabled();
+			}
+		}
+
+		ImGui::EndChild();
+		ImGui::PopStyleVar();
+		ImGui::SetCursorScreenPos(currentScreenPosition);
+	}
+}
+
+
+//
+//	TextEditor::selectFirstOccurrenceOf
+//
+
+void TextEditor::selectFirstOccurrenceOf(const std::string_view& text, bool caseSensitive, bool wholeWord) {
+	Coordinate start, end;
+
+	if (document.findText(Coordinate(0, 0), text, caseSensitive, wholeWord, start, end)) {
+		cursors.setCursor(start, end);
+		makeCursorVisible();
+
+	} else {
+		cursors.clearAdditional(true);
+	}
+}
+
+
+//
+//	TextEditor::selectNextOccurrenceOf
+//
+
+void TextEditor::selectNextOccurrenceOf(const std::string_view& text, bool caseSensitive, bool wholeWord) {
+	Coordinate start, end;
+
+	if (document.findText(cursors.getCurrent().getSelectionEnd(), text, caseSensitive, wholeWord, start, end)) {
+		cursors.setCursor(start, end);
+		makeCursorVisible();
+
+	} else {
+		cursors.clearAdditional(true);
+	}
+}
+
+
+//
+//	TextEditor::selectAllOccurrencesOf
+//
+
+void TextEditor::selectAllOccurrencesOf(const std::string_view& text, bool caseSensitive, bool wholeWord) {
+	Coordinate start, end;
+
+	if (document.findText(Coordinate(0, 0), text, caseSensitive, wholeWord, start, end)) {
+		cursors.setCursor(start, end);
+		bool done = false;
+
+		while (!done) {
+			Coordinate nextStart, nextEnd;
+			document.findText(cursors.getCurrent().getSelectionEnd(), text, caseSensitive, wholeWord, nextStart, nextEnd);
+
+			if (nextStart == start && nextEnd == end) {
+				done = true;
+
+			} else {
+				cursors.addCursor(nextStart, nextEnd);
+			}
+		}
+
+		makeCursorVisible();
+
+	} else {
+		cursors.clearAdditional(true);
+	}
+}
+
+
+//
+//	TextEditor::addNextOccurrence
+//
+
+void TextEditor::addNextOccurrence() {
+
+	auto cursor = cursors.getCurrent();
+	auto text = document.getSectionText(cursor.getSelectionStart(), cursor.getSelectionEnd());
+	Coordinate start, end;
+
+	if (document.findText(cursor.getSelectionEnd(), text, true, false, start, end)) {
+		cursors.addCursor(start, end);
+	}
+}
+
+
+//
+//	TextEditor::addNextOccurrences
+//
+
+void TextEditor::selectAllOccurrences() {
+	auto cursor = cursors.getCurrent();
+	auto text = document.getSectionText(cursor.getSelectionStart(), cursor.getSelectionEnd());
+	selectAllOccurrencesOf(text, true, false);
+}
+
+
+//
+//	TextEditor::replaceTextInCurrentCursor
+//
+
+void TextEditor::replaceTextInCurrentCursor(const std::string_view& text) {
+	auto transaction = startTransaction();
+
+	// first delete old text
+	auto cursor = cursors.getCurrentAsIterator();
+	auto start = cursor->getSelectionStart();
+	auto end = cursor->getSelectionEnd();
+	deleteText(transaction, start, end);
+	cursors.adjustForDelete(cursor, start, end);
+
+	// now insert new text
+	Coordinate newEnd = insertText(transaction, start, text);
+	cursor->update(newEnd, false);
+	cursors.adjustForInsert(cursor, start, newEnd);
+
+	endTransaction(transaction);
+}
+
+
+//
+//	TextEditor::replaceTextInAllCursors
+//
+
+void TextEditor::replaceTextInAllCursors(const std::string_view& text) {
+	auto transaction = startTransaction();
+	insertTextIntoAllCursors(transaction, text);
+	endTransaction(transaction);
+}
+
+
+//
+//	TextEditor::replaceSectionText
+//
+
+void TextEditor::replaceSectionText(const Coordinate& start, const Coordinate& end, const std::string_view& text) {
+	auto transaction = startTransaction();
+	deleteText(transaction, start, end);
+	auto newEnd = insertText(transaction, start, text);
+	cursors.clearAdditional();
+	cursors.getMain().update(newEnd, newEnd);
+	endTransaction(transaction);
+}
+
+
+//
+//	TextEditor::openFindReplace
+//
+
+void TextEditor::openFindReplace() {
+	// get main cursor location
+	auto cursor = cursors.getMain();
+
+	// see if we have a current selection that's on one line
+	if (cursor.hasSelection()) {
+		if (cursor.getSelectionStart().line == cursor.getSelectionEnd().line) {
+			// use it as the default search
+			findText = document.getSectionText(cursor.getSelectionStart(), cursor.getSelectionEnd());
+		}
+
+	} else {
+		// if cursor is inside "real" word, use that as the default
+		auto start = document.findWordStart(cursor.getSelectionStart(), true);
+		auto end = document.findWordEnd(cursor.getSelectionStart(), true);
+
+		if (start != end) {
+			findText = document.getSectionText(start, end);
+		}
+	}
+
+	findReplaceVisible = true;
+	focusOnFind = true;
+}
+
+
+//
+//	TextEditor::closeFindReplace
+//
+
+void TextEditor::closeFindReplace() {
+	findReplaceVisible = false;
+	focusOnFind = false;
+	focusOnEditor = true;
+}
+
+
+//
+//	TextEditor::find
+//
+
+void TextEditor::find() {
+	if (findText.size()) {
+		selectNextOccurrenceOf(findText, caseSensitiveFind, wholeWordFind);
+		focusOnEditor = true;
+	}
+}
+
+
+//
+//	TextEditor::findNext
+//
+
+void TextEditor::findNext() {
+	if (findText.size()) {
+		selectNextOccurrenceOf(findText, caseSensitiveFind, wholeWordFind);
+		focusOnEditor = true;
+	}
+}
+
+
+//
+//	TextEditor::findAll
+//
+
+void TextEditor::findAll() {
+	if (findText.size()) {
+		selectAllOccurrencesOf(findText, caseSensitiveFind, wholeWordFind);
+		focusOnEditor = true;
+	}
+}
+
+
+//
+//	TextEditor::replace
+//
+
+void TextEditor::replace() {
+	if (findText.size()) {
+		if (!cursors.anyHasSelection()) {
+			selectNextOccurrenceOf(findText, caseSensitiveFind, wholeWordFind);
+		}
+
+		replaceTextInCurrentCursor(replaceText);
+		selectNextOccurrenceOf(findText, caseSensitiveFind, wholeWordFind);
+		focusOnEditor = true;
+	}
+}
+
+
+//
+//	TextEditor::replaceAll
+//
+
+void TextEditor::replaceAll() {
+	if (findText.size()) {
+		selectAllOccurrencesOf(findText, caseSensitiveFind, wholeWordFind);
+		replaceTextInAllCursors(replaceText);
+		focusOnEditor = true;
+	}
+}
+
+
+
+//
+//	TextEditor::setAutoCompleteConfig
+//
+
+
+void TextEditor::Autocomplete::setConfig(const AutoCompleteConfig* config) {
+	if (config) {
+		configuration = *config;
+		configured = true;
+
+	} else {
+		configured = false;
+	}
+
+	active = false;
+}
+
+
+//
+//	TextEditor::Autocomplete::startTyping
+//
+
+bool TextEditor::Autocomplete::startTyping(Cursors& cursors) {
+	if (!active && !requestActivation && configured && configuration.triggersOnTyping) {
+		return start(cursors);
+
+	} else {
+		return false;
+	}
+}
+
+
+//
+//	TextEditor::Autocomplete::startShortcut
+//
+
+bool TextEditor::Autocomplete::startShortcut(Cursors& cursors) {
+	if (!active && !requestActivation && configured && configuration.triggersOnShortcut) {
+		return (start(cursors));
+
+	} else {
+		return false;
+	}
+}
+
+
+//
+//	TextEditor::Autocomplete::cancel
+//
+
+void TextEditor::Autocomplete::cancel() {
+	if (active) {
+		requestDeactivation = true;
+	}
+}
+
+
+//
+//	renderSuggestion
+//
+
+static bool renderSuggestion(const std::string_view& suggestion, const std::string_view& searchTerm, bool selected) {
+	// custom widget to render an autocomplete suggestion in the style of Visual Studio Code
+	auto glyphPos = ImGui::GetCursorScreenPos();
+	auto size = ImVec2(250.0f, ImGui::GetFrameHeightWithSpacing());
+	auto clicked = ImGui::InvisibleButton("suggestion", size);
+
+	auto drawList = ImGui::GetWindowDrawList();
+	auto font = ImGui::GetFont();
+	auto fontSize = ImGui::GetFontSize();
+	auto glyphWidth = ImGui::CalcTextSize("#").x;
+
+	// highlight selected item
+	if (selected) {
+		drawList->AddRectFilled(glyphPos, glyphPos + size, ImGui::GetColorU32(ImGuiCol_Header));
+	}
+
+	// process all UTF-8 glyphs in suggestion
+	glyphPos += ImGui::GetStyle().FramePadding;
+	auto suggestionEnd = suggestion.end();
+	auto searchTermEnd = searchTerm.end();
+	auto i = TextEditor::CodePoint::skipBOM(suggestion.begin(), suggestionEnd);
+	auto j = TextEditor::CodePoint::skipBOM(searchTerm.begin(), searchTermEnd);
+
+	while (i < suggestionEnd) {
+		// get next glyph from suggestion
+		ImWchar codepoint;
+		i = TextEditor::CodePoint::read(i, suggestionEnd, &codepoint);
+
+		// highlight glyph in suggestion that match search term
+		auto color = ImGui::GetColorU32(ImGuiCol_Text);
+
+		if (j < searchTermEnd) {
+			ImWchar searchCodePoint;
+			auto next = TextEditor::CodePoint::read(j, searchTermEnd, &searchCodePoint);
+
+			if (searchCodePoint == codepoint) {
+				color = ImGui::GetColorU32(ImGuiCol_TextLink);
+				j = next;
+			}
+		}
+
+		// render the glyph
+		font->RenderChar(drawList, fontSize, glyphPos, color, codepoint);
+		glyphPos.x += glyphWidth;
+	}
+
+	return clicked;
+}
+
+
+//
+//	TextEditor::Autocomplete::render
+//
+
+bool TextEditor::Autocomplete::render(Document& document, Cursors& cursors, const Language* language, float textOffset, ImVec2 glyphSize) {
+	// see if we need to activate autocomplete mode
+	if (requestActivation) {
+		// apply popup delay
+		if (std::chrono::system_clock::now() > activationTime) {
+			// reset activation flag
+			requestActivation = false;
+
+			// capture locations
+			startLocation = document.findWordStart(currentLocation, true);
+
+			// update the autocomplete state
+			updateState(document, language);
+
+			// handle cases where autocomplete request is ignored
+			if(state.inComment && !configuration.triggerInComments) {
+				return false;
+			}
+
+			if(state.inString && !configuration.triggerInStrings) {
+				return false;
+			}
+
+			// get initial list of suggestions from the app
+			refreshSuggestions();
+
+			// show autocomplete popup window
+			ImGui::OpenPopup("AutoCompleteContextMenu");
+			active = true;
+		}
+	}
+
+	// only continue if autocomplete is active
+	if (!active) {
+		return false;
+	}
+
+	// see if cursor moved since last time
+	auto newLocation = cursors.getMain().getSelectionEnd();
+
+	if (newLocation != currentLocation) {
+		// see if we need to deactivate autocomplete because cursor is on new line
+		if (newLocation.line != currentLocation.line) {
+			requestDeactivation = true;
+
+		} else {
+			// see if cursor moved away from current word
+			auto newStart = document.findWordStart(newLocation, true);
+
+			if (newStart == startLocation) {
+				currentLocation = newLocation;
+
+				// we deactivate autocomplete if the current location is the start
+				if (currentLocation == startLocation) {
+					requestDeactivation = true;
+
+				} else {
+					updateState(document, language);
+					refreshSuggestions();
+				}
+
+			} else {
+				requestDeactivation = true;
+			}
+		}
+	}
+
+	// close autocomplete when user hits escape key
+	if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+		requestDeactivation = true;
+	}
+
+	// open popup window
+	bool result = false;
+	auto cursorScreenPos = ImGui::GetCursorScreenPos();
+
+	ImGui::SetNextWindowPos(ImVec2(
+		cursorScreenPos.x + textOffset + currentLocation.column * glyphSize.x,
+		cursorScreenPos.y + (currentLocation.line + 1) * glyphSize.y));
+
+	ImGuiWindowFlags flags =
+		ImGuiWindowFlags_NoFocusOnAppearing |
+		ImGuiWindowFlags_NoNav;
+
+	if (ImGui::BeginPopup("AutoCompleteContextMenu", flags)) {
+		if (ImGui::IsWindowAppearing()) {
+	    	ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
+		}
+
+		// deactivate popup (if requested)
+		if (requestDeactivation) {
+			ImGui::CloseCurrentPopup();
+			requestDeactivation = false;
+			active = false;
+
+		} else {
+			// do we have any suggestions
+			if (state.suggestions.size()) {
+				auto items = std::min(state.suggestions.size(), static_cast<size_t>(10));
+
+				// apply arrow keys to selected suggestion
+				if (ImGui::IsKeyPressed(ImGuiKey_UpArrow) && currentSelection > 0) {
+					currentSelection--;
+
+				} else if (ImGui::IsKeyPressed(ImGuiKey_DownArrow) && currentSelection < items - 1) {
+					currentSelection++;
+
+				// use selected suggestion if user hit tab of return
+				} else if (ImGui::IsKeyPressed(ImGuiKey_Tab) || ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) {
+					requestDeactivation = true;
+					result = true;
+
+				} else if (configuration.autoInsertSingleSuggestions && state.suggestions.size() == 1) {
+					requestDeactivation = true;
+					result = true;
+				}
+
+				// render top suggestions
+				for (size_t i = 0; i < items; i++) {
+					// ensure unique ID
+					ImGui::PushID(static_cast<int>(i));
+
+					if (renderSuggestion(state.suggestions[i].c_str(), state.searchTerm, i == currentSelection)) {
+						// user clicked on a suggestion, use it
+						currentSelection = i;
+						requestDeactivation = true;
+						result = true;
+					}
+
+					ImGui::PopID();
+				}
+
+			} else {
+				ImGui::TextUnformatted("No suggestions");
+			}
+		}
+
+		ImGui::EndPopup();
+
+	} else {
+		requestDeactivation = false;
+		active = false;
+	}
+
+	return result;
+}
+
+
+//
+//	TextEditor::Autocomplete::setSuggestions
+//
+
+void TextEditor::Autocomplete::setSuggestions(const std::vector<std::string>& suggestions) {
+	state.suggestions = suggestions;
+	currentSelection = 0;
+}
+
+
+//
+//	TextEditor::Autocomplete::start
+//
+
+bool TextEditor::Autocomplete::start(Cursors& cursors) {
+	// don't activate if we have multiple cursors active
+	if (!cursors.hasMultiple()) {
+		// request start of autocomplete mode (can't be done here as the Dear ImGui context might not be right)
+		requestActivation = true;
+		currentLocation = cursors.getMain().getSelectionEnd();
+		activationTime = std::chrono::system_clock::now() + configuration.triggerDelay;
+		return true;
+
+	} else {
+		return false;
+	}
+}
+
+
+//
+//	TextEditor::Autocomplete::updateState
+//
+
+void TextEditor::Autocomplete::updateState(Document& document, const Language* language) {
+	state.searchTerm = document.getSectionText(startLocation, currentLocation);
+
+	if (currentLocation.column == 0) {
+		state.inIdentifier = false;
+		state.inNumber = false;
+
+		auto lineState = document[currentLocation.line].state;
+		state.inComment = lineState == State::inComment;
+
+		state.inString =
+			lineState == State::inDoubleQuotedString ||
+			lineState == State::inSingleQuotedString||
+			lineState == State::inOtherString ||
+			lineState == State::inOtherStringAlt;
+
+	} else {
+		auto color = document[currentLocation.line][currentLocation.column - 1].color;
+		state.inIdentifier = color == Color::identifier || color == Color::knownIdentifier;
+		state.inNumber = color == Color::number;
+		state.inComment = color == Color::comment;
+		state.inString = color == Color::string;
+	}
+
+	state.line = currentLocation.line;
+	state.searchTermStartColumn = startLocation.column;
+	state.searchTermStartIndex = document.getIndex(startLocation);
+	state.searchTermEndColumn = currentLocation.column;
+	state.searchTermEndIndex= document.getIndex(currentLocation);
+
+	state.language = language;
+	state.userData = configuration.userData;
+}
+
+
+//
+//	TextEditor::Autocomplete::refreshSuggestions
+//
+
+void TextEditor::Autocomplete::refreshSuggestions() {
+	// populate suggestion list through callback (or clear it if there is none)
+	if (configuration.callback) {
+		configuration.callback(state);
+
+	} else {
+		state.suggestions.clear();
+	}
+
+	currentSelection = 0;
+}
+
+
+//
+//	TextEditor::Trie::insert
+//
+
+void TextEditor::Trie::insert(const std::string_view& word) {
+	auto node = root.get();
+	auto end = word.end();
+	auto i = TextEditor::CodePoint::skipBOM(word.begin(), end);
+
+	while (i < end) {
+		ImWchar codepoint;
+		i = TextEditor::CodePoint::read(i, end, &codepoint);
+		codepoint = TextEditor::CodePoint::toLower(codepoint);
+
+		if (node->children.find(codepoint) == node->children.end()) {
+			node->children[codepoint] = std::make_unique<Node>();
+		}
+
+		node = node->children[codepoint].get();
+	}
+
+	node->word = word;
+}
+
+
+//
+//	TextEditor::Trie::findSuggestions
+//
+
+void TextEditor::Trie::findSuggestions(std::vector<std::string>& suggestions, const std::string_view& searchTerm, size_t maxSkippedLetters) {
+	// clear result vector
+	maxSkip = maxSkippedLetters;
+	suggestions.clear();
+
+	// don't even try if search term is empty
+	if (searchTerm.size() != 0) {
+		// convert search term into vector of code blocks
+		searchCodepoints.clear();
+		auto end = searchTerm.end();
+		auto i = TextEditor::CodePoint::skipBOM(searchTerm.begin(), end);
+
+		while (i < end) {
+			ImWchar codepoint;
+			i = TextEditor::CodePoint::read(i, end, &codepoint);
+			searchCodepoints.emplace_back(TextEditor::CodePoint::toLower(codepoint));
+		}
+
+		// recursively evaluate nodes
+		candidates.clear();
+		evaluateNode(root.get(), 0, 0, maxSkip);
+
+		// did we find anything?
+		if (candidates.size()) {
+			// sort candidates by cost
+			std::sort(candidates.begin(), candidates.end());
+
+			// remove duplicates which are caused by mutiple paths through word based on skips
+			auto last = std::unique(candidates.begin(), candidates.end());
+			candidates.erase(last, candidates.end());
+
+			// populate suggestions
+			auto size = std::min(static_cast<size_t>(10), candidates.size());
+
+			for (size_t j = 0; j < size; j++) {
+				suggestions.emplace_back(candidates[j].node->word);
+			}
+		}
+	}
+}
+
+
+//
+//	TextEditor::Trie::evaluateNode
+//
+
+void TextEditor::Trie::evaluateNode(const Node* node, size_t index, size_t cost, size_t skip) {
+	// get next codeword
+	ImWchar codepoint = searchCodepoints[index];
+
+	// see if that is one of our children
+	auto child = (node->children.find(codepoint) != node->children.end()) ? node->children.at(codepoint).get() : nullptr;
+
+	if (child) {
+		// codeword found, is this the last codepoint in our searchTerm?
+		if (index == searchCodepoints.size() - 1) {
+			// yes, add candidate words to results
+			addCandidates(child, cost);
+
+		} else {
+			// no, try to find the rest
+			evaluateNode(child, index + 1, cost, maxSkip);
+		}
+	}
+
+	// also try children to support detection of missing letters (if we haven't skipped too many entries yet)
+	if (skip) {
+		for (auto const& [key, value] : node->children) {
+			auto next = value.get();
+
+			if (next != child) {
+				evaluateNode(next, index, cost + 1, skip - 1);
+			}
+		}
+	}
+}
+
+
+//
+//	TextEditor::Trie::addCandidates
+//
+
+void TextEditor::Trie::addCandidates(const Node* node, size_t cost) {
+	if (node->word.size()) {
+		candidates.emplace_back(node, cost);
+	}
+
+	for (auto const& [key, value] : node->children) {
+		addCandidates(value.get(), cost + 1);
+	}
 }
 
 

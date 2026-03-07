@@ -79,6 +79,7 @@ void Editor::newFile() {
 			editor.SetText("");
 			version = editor.GetUndoIndex();
 			filename = "untitled";
+			buildAutocompleteTrie();
 		});
 
 	} else {
@@ -86,6 +87,7 @@ void Editor::newFile() {
 		editor.SetText("");
 		version = editor.GetUndoIndex();
 		filename = "untitled";
+		buildAutocompleteTrie();
 	}
 }
 
@@ -121,6 +123,8 @@ void Editor::openFile(const std::string& path) {
 		editor.SetText(text);
 		version = editor.GetUndoIndex();
 		filename = path;
+
+		buildAutocompleteTrie();
 
 	} catch (std::exception& e) {
 		showError(e.what());
@@ -279,6 +283,7 @@ void Editor::renderMenuBar() {
 			ImGui::Separator();
 
 			bool flag;
+			if (ImGui::MenuItem("Autocomplete", nullptr, &autocomplete)) { setAutocompleteMode(autocomplete); }
 			flag = editor.IsShowWhitespacesEnabled(); if (ImGui::MenuItem("Show Whitespaces", nullptr, &flag)) { editor.SetShowWhitespacesEnabled(flag); };
 			flag = editor.IsShowSpacesEnabled(); if (ImGui::MenuItem("Show Spaces", nullptr, &flag)) { editor.SetShowSpacesEnabled(flag); };
 			flag = editor.IsShowTabsEnabled(); if (ImGui::MenuItem("Show Tabs", nullptr, &flag)) { editor.SetShowTabsEnabled(flag); };
@@ -355,6 +360,7 @@ void Editor::renderStatusBar() {
 
 			if (ImGui::Selectable(languages[n], selected)) {
 				editor.SetLanguage(definitions[n]);
+				buildAutocompleteTrie();
 			}
 
 			if (selected) {
@@ -668,4 +674,61 @@ void Editor::renderConfirmError() {
 
 		ImGui::EndPopup();
 	}
+}
+
+
+//
+//	Editor::setAutocompleteMode
+//
+
+void Editor::setAutocompleteMode(bool flag) {
+	if (flag) {
+		// rebuild word list
+		buildAutocompleteTrie();
+
+		// enable autocomplete
+		TextEditor::AutoCompleteConfig config;
+
+		config.callback = [this](TextEditor::AutoCompleteState& state) {
+			trie.findSuggestions(state.suggestions, state.searchTerm);
+		};
+
+		editor.SetAutoCompleteConfig(&config);
+
+		// enable change tracking
+		// (we don't track every keystroke, callbacks can be delayed up to 3000 milliseconds)
+		editor.SetChangeCallback([this]() {
+			buildAutocompleteTrie();
+		}, 3000);
+
+
+	} else {
+		// disable autocomplete and change tracking
+		editor.SetAutoCompleteConfig(nullptr);
+		editor.SetChangeCallback(nullptr);
+	}
+}
+
+
+//
+//	Editor::buildAutocompleteTrie
+//
+
+void Editor::buildAutocompleteTrie() {
+	// rebuild autocomplete word list
+	trie.clear();
+
+	// add language words (if required)
+	auto language = editor.GetLanguage();
+
+	if (language) {
+		for (auto& word : language->keywords) { trie.insert(word); }
+		for (auto& word : language->declarations) { trie.insert(word); }
+		for (auto& word : language->identifiers) { trie.insert(word); }
+	}
+
+	// add all identifiers in document
+	editor.IterateIdentifiers([this](const std::string& identifier) {
+		trie.insert(identifier);
+	});
 }

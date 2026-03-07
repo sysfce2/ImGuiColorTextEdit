@@ -26,7 +26,7 @@ public:
 	// constructor
 	Editor();
 
-	// file releated functions
+	// file related functions
 	void newFile();
 	void openFile();
 	void openFile(const std::string& path);
@@ -58,6 +58,9 @@ public:
 	void renderConfirmQuit();
 	void renderConfirmError();
 
+	void setAutocompleteMode(bool flag);
+	void buildAutocompleteTrie();
+
 	inline bool isDirty() const { return editor.GetUndoIndex() != version; }
 	inline bool isSavable() const { return isDirty() && filename != "untitled"; }
 
@@ -74,6 +77,9 @@ public:
 	float fontSize = 17.0f;
 	inline void increaseFontSIze() { fontSize = std::clamp(fontSize + 1.0f, 8.0f, 24.0f); }
 	inline void decreaseFontSIze() { fontSize = std::clamp(fontSize - 1.0f, 8.0f, 24.0f); }
+
+	bool autocomplete = false;
+	TextEditor::Trie trie;
 
 	// editor state
 	enum class State {

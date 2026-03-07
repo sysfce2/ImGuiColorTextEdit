@@ -68,6 +68,7 @@ public API to externally implement these features is however included.
 - Has option to automatically insert spaces on tabs.
 - Has find/replace user interface and API with full undo/redo.
 - Find has options for whole word and/or case-sensitive searches.
+- Provides optional autocomplete framework (see [more information here](docs/autocomplete.md)).
 - Has marker API to specify lines and/or line numbers to highlight and optional show tooltips (see [example](docs/markers.md)).
 - Has optional scrollbar minimap to render cursor, selection and marker locations.
 - Provides middle-mouse pan and scroll functions like CAD programs and browsers.
@@ -104,7 +105,7 @@ Dear ImGui context by doing the following:
 
 - Include the TextEditor.cpp and TextEditor.h files in your project.
 - Instantiate a TextEditor object for each editor widget you need.
-- Use the public API to set editor options or interact with the editor contents.
+- Use the public API to set editor options or interact with the editor's contents.
 - Call the TextEditor's Render member function every frame in your Dear ImGui loop.
 - If you plan to use non-ASCII characters in your text, see the Unicode section below.
 - Configure Dear ImGui's clipboard functions since that is what this editor uses.
@@ -197,7 +198,13 @@ For a complete example, please see the [example folder](example/).
 	- In all other cases, the previous search term is used.
 	- When the search and replace window is visible, hitting the ESC button closes it.
 	- Shift-Ctrl-f finds all instances and makes them separate cursors.
-	- Ctrl-g finds next instance of search text.
+	- Ctrl-g finds n
+
+- Autocomplete:
+	- Once configured, Ctrl-space (or a custom key combination) triggers a manual autocomplete (even on MacOS as Cmd-space globally triggers Spotlight searching on that platform).
+	- Typing also triggers autocomplete (based on context).
+	- You can configure which triggers you want (the default is for both manual and automatic (by just typing) to be active)
+	- Autocomplete does not work when multiple cursors are active.
 
 - Other:
 	- Insert key toggles between insert (default) and overwrite modes.
@@ -220,9 +227,9 @@ basically limits unicode support to the Basic Multilingual Plane (see
 Regardless of whether 16 or 32 bit codepoints are used, it is your responsibility
 to ensure Dear ImGui is configured with the correct font and font size. As of
 Dear ImGui v1.92, you can now use dynamically sized fonts and use any font glyph
-without setting up glyph ranges or a font atlas. All this functionality is now
-in the Dear ImGui core and the TextEditor uses it. Please see the example application
-on how to use PushFont/PopFont around the TextEditor Render function. The demo app
+without setting up glyph ranges or a font atlas. All this functionality is in the
+Dear ImGui core and the TextEditor uses it. Please see the example application on
+how to use PushFont/PopFont around the TextEditor Render function. The demo app
 also shows how to increase/decrease the font size on the fly.
 
 ## Architecture
@@ -293,6 +300,13 @@ curly brackets) are in the document so they can be highlighted and colorized
 when this feature is activated. It will also colorize unbalanced brackets as
 errors. Brackets in comments and strings are ignored.
 
+#### Autocomplete
+
+This class keeps track of autocomplete activities when the feature is configured.
+Once autocomplete is triggered, this class tracks the state, interacts with the
+user and uses an external callback to provide suggestions in the current context
+(see [details here](docs/autocomplete.md)).
+
 #### Coordinate
 
 Coordinates represent a character coordinate from the user's point of view,
@@ -316,8 +330,8 @@ updated, Cursors get adjusted (if required), Transaction records are created (so
 this paste operation can be undone and redone) and the Colorizer/Bracketeer are
 informed of the changes.
 
-The final responsibility of the TextEditor class is rendering and user input
-(keyboard and mouse) processing.
+The final responsibility of the TextEditor class is overall rendering and
+user input (keyboard and mouse) processing.
 
 #### TextDiff
 
@@ -350,7 +364,8 @@ are available. If you find any problems or want to make a suggestion for improve
 
 ## Credits
 
-This version of ImGuiColorTextEdit was written from scratch by [Johan A. Goossens](https://github.com/goossens).
+This version of ImGuiColorTextEdit was written from scratch by [Johan A. Goossens](https://github.com/goossens)
+and if you end up using (parts of) this repository a shoutout or Github star would be appreciated.
 
 Thank you to [Omar Cornut](https://github.com/ocornut/imgui) for creating Dear ImGui
 in the first place. Without you, this editor would not exist.

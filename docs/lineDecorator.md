@@ -1,4 +1,4 @@
-# Line Decorator Example
+# Line Decorator
 
 The text editor provides an option to add a line decorator. This decorator gets called for each visible line and the integrator can render whatever they want in the requested space and can also handle user inputs the usual Dear ImGui way.
 

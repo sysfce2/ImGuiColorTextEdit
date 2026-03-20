@@ -148,6 +148,9 @@ public:
 	inline void GetMainCursor(int& line, int& column) const { return getCursor(line, column, cursors.getMainIndex()); }
 	inline void GetCurrentCursor(int& line, int& column) const { return getCursor(line, column, cursors.getCurrentIndex()); }
 
+	// get the word at a screen position (e.g. from ImGui::GetMousePos()) - uses the origin saved during the last Render() call
+	std::string GetWordAtScreenPos(const ImVec2& screenPos) const;
+
 	// scrolling support
 	enum class Scroll {
 		alignTop,
@@ -1281,6 +1284,7 @@ protected:
 	ImFont* font;
 	float fontSize;
 	ImVec2 glyphSize;
+	ImVec2 lastRenderOrigin;
 	float lineNumberLeftOffset;
 	float lineNumberRightOffset;
 	float decorationOffset;

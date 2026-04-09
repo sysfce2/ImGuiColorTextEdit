@@ -1773,7 +1773,7 @@ void TextEditor::moveUpLines() {
 
 			// delete existing lines
 			auto deleteStart = document.getStartOfLine(start);
-			auto deleteEnd = (end.column == 0) ? end : document.getNextLine(end);;
+			auto deleteEnd = (end.column == 0) ? end : document.getNextLine(end);
 			auto text = document.getSectionText(deleteStart, deleteEnd);
 			deleteText(transaction, deleteStart, deleteEnd);
 			cursors.adjustForDelete(cursor, deleteStart, deleteEnd);
@@ -1807,7 +1807,7 @@ void TextEditor::moveDownLines() {
 
 			// delete existing lines
 			auto deleteStart = document.getStartOfLine(start);
-			auto deleteEnd = (end.column == 0) ? end : document.getNextLine(end);;
+			auto deleteEnd = (end.column == 0) ? end : document.getNextLine(end);
 			auto text = document.getSectionText(deleteStart, deleteEnd);
 			deleteText(transaction, deleteStart, deleteEnd);
 			cursors.adjustForDelete(cursor, deleteStart, deleteEnd);
@@ -2203,6 +2203,7 @@ void TextEditor::deleteTextFromAllCursors(std::shared_ptr<Transaction> transacti
 			auto start = cursor->getSelectionStart();
 			auto end = cursor->getSelectionEnd();
 			deleteText(transaction, start, end);
+			cursor->update(start, false);
 			cursors.adjustForDelete(cursor, start, end);
 		}
 	}
@@ -3489,7 +3490,7 @@ void TextEditor::Document::normalizeCoordinate(float line, float column, Coordin
 		cursorCoordinate = glyphCoordinate;
 
 	} else if (line >= static_cast<float>(lineCount())) {
-		glyphCoordinate = Coordinate(lineCount() - 1, at(lineCount() - 1).maxColumn);;
+		glyphCoordinate = Coordinate(lineCount() - 1, at(lineCount() - 1).maxColumn);
 		cursorCoordinate = glyphCoordinate;
 
 	} else {

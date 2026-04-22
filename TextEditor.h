@@ -708,7 +708,6 @@ public:
 	};
 
 	// set the current ImGui context
-	//
 	// this is ONLY necessary if you are compiling this widget as a DLL (which is NOT recommended)
 	// it sets the global variable GImGui, which is not shared across DLL boundaries
 	// see GImGui documentation in imgui.cpp for more details

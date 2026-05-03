@@ -16,7 +16,7 @@
 </div>
 
 > [!NOTE]
-> The editor is being refactored to enable new features like Word Wrap, Line Folding, full MiniMaps, Autocomplete and Language Server connectivity. This refactoring will break backwards compatibility. A preview is avalable in the "future" branch. Once more testing is done, this new architecture will become the master branch.
+> The editor is being refactored to enable new features like Word Wrap, Line Folding, full MiniMaps, Autocomplete and Language Server connectivity. This refactoring will break backwards compatibility. A preview is avalable in the [future branch](https://github.com/goossens/ImGuiColorTextEdit/tree/future). Once more testing is done, this new architecture will become the master branch.
 
 TextEdit is a syntax highlighting text editor for
 [Dear ImGui](https://github.com/ocornut/imgui) and it was originally developed by
